@@ -13,6 +13,7 @@ import re
 import argparse
 from pathlib import Path
 from shutil import copyfile
+from difflib import unified_diff
 
 try:
     from colorama import Fore, Style, init
@@ -23,6 +24,8 @@ except ImportError:
 
 INCLUDE_PATTERN = re.compile(r'#include\s+"@/(.+?)"')
 DEFAULT_EXTENSIONS = ('.c', '.h', '.cpp', '.hpp', '.cc', '.cxx')
+
+MISSING_INCLUDES = []
 
 def log(msg, level="info", verbose=False):
     if not USE_COLOR:
@@ -53,7 +56,9 @@ def find_source_files(root_dir: Path, extensions, exclude_dirs):
 def compute_relative_include(current_file: Path, include_path: str, project_root: Path):
     absolute_path = (project_root / include_path).resolve()
     if not absolute_path.exists():
-        log(f"[WARN] Include target not found: {absolute_path}", "warn")
+        log(f"[MISSING] {include_path} in {current_file}", "error")
+        MISSING_INCLUDES.append((current_file, include_path))
+        return None
     try:
         return os.path.relpath(absolute_path, start=current_file.parent)
     except ValueError:
@@ -68,7 +73,7 @@ def next_backup_filename(original: Path):
             return bak
         i += 1
 
-def process_file(file_path: Path, project_root: Path, dry_run=False, force=False, make_backup=True, verbose=False):
+def process_file(file_path: Path, project_root: Path, dry_run=False, force=False, make_backup=True, verbose=False, check_only=False, show_diff=False):
     try:
         lines = file_path.read_text(encoding='utf-8').splitlines(keepends=True)
     except Exception as e:
@@ -91,6 +96,9 @@ def process_file(file_path: Path, project_root: Path, dry_run=False, force=False
                     line = new_line
         updated_lines.append(line)
 
+    if check_only:
+        return changed
+
     if changed or force:
         if dry_run:
             log(f"[DRY-RUN] Would update: {file_path}", "update")
@@ -100,6 +108,15 @@ def process_file(file_path: Path, project_root: Path, dry_run=False, force=False
                 copyfile(file_path, backup_path)
                 log(f"[BACKUP] Created: {backup_path}", "debug", verbose)
             try:
+                if show_diff:
+                    diff = unified_diff(
+                        [l.rstrip('\n') for l in lines],
+                        [l.rstrip('\n') for l in updated_lines],
+                        fromfile=str(file_path),
+                        tofile=str(file_path) + " (updated)",
+                        lineterm=""
+                    )
+                    print("\n".join(diff))
                 file_path.write_text("".join(updated_lines), encoding='utf-8')
                 log(f"[UPDATED] {file_path}", "success")
             except Exception as e:
@@ -119,6 +136,8 @@ def main():
     parser.add_argument("--ext", nargs="*", help="Additional extensions to scan (e.g. cpp hpp)")
     parser.add_argument("--exclude", nargs="*", default=[], help="Folders to exclude (e.g. build third_party)")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose debug output")
+    parser.add_argument("--check-only", action="store_true", help="Only check for missing includes and possible changes")
+    parser.add_argument("--show-diff", action="store_true", help="Show diff when changes are made")
 
     args = parser.parse_args()
     project_root = Path(args.root).resolve()
@@ -143,7 +162,9 @@ def main():
             dry_run=args.dry_run,
             force=args.force,
             make_backup=not args.no_backup,
-            verbose=args.verbose
+            verbose=args.verbose,
+            check_only=args.check_only,
+            show_diff=args.show_diff
         )
         if result:
             updated += 1
@@ -151,9 +172,13 @@ def main():
             skipped += 1
 
     log(f"\nSummary:", "info")
-    log(f"  Total files scanned : {total}", "info")
-    log(f"  Files updated       : {updated}", "success")
-    log(f"  Files skipped       : {skipped}", "warn")
+    log(f"  Total files scanned     : {total}", "info")
+    log(f"  Files updated           : {updated}", "success")
+    log(f"  Files skipped           : {skipped}", "warn")
+    log(f"  Missing include targets : {len(MISSING_INCLUDES)}", "error")
+    if MISSING_INCLUDES:
+        for file, include in MISSING_INCLUDES:
+            log(f"    {file}: '@/ {include}' not found", "error")
     if args.dry_run:
         log("Dry-run mode: No files were written.", "warn")
 
